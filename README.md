@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # hazel-server (Vercel)
 
 This repo deploys a Hazel update server (for Electron auto-updates) to Vercel.
@@ -35,3 +36,7 @@ Open `http://localhost:4000/`.
 4. Deploy.
 
 All routes are rewritten to the serverless function via `vercel.json`.
+=======
+# hazel-ca-updater
+A Hazel server for use as an updater server for Circuit Assistant
+>>>>>>> 3aa6add2a9d2dc47b286ffa6770b924e991039c9
