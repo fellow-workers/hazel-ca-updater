@@ -1,4 +1,9 @@
 {
   "version": 2,
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/hazel" }]
+  "builds": [
+    { "src": "index.js", "use": "@vercel/node" }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "/index.js" }
+  ]
 }
