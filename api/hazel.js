@@ -1,5 +1,6 @@
 const hazel = require('hazel-server')
 const { resolveHazelConfig } = require('../lib/hazelConfig')
+const { createAnalyticsMiddleware } = require('../lib/vercelAnalytics')
 
 const config = resolveHazelConfig()
 
@@ -30,16 +31,22 @@ if (config.account && config.repository) {
   handler = hazel(config)
 }
 
+// Create analytics middleware instance
+const analyticsMiddleware = createAnalyticsMiddleware()
+
 module.exports = (req, res) => {
-  if (!handler) {
-    res.statusCode = 500
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-    res.end(missingConfigMessage())
-    return
-  }
+  // Apply analytics middleware
+  analyticsMiddleware(req, res, () => {
+    if (!handler) {
+      res.statusCode = 500
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+      res.end(missingConfigMessage())
+      return
+    }
 
-  req.url = stripPrefix(req.url, '/api/hazel')
-  req.url = stripPrefix(req.url, '/api')
+    req.url = stripPrefix(req.url, '/api/hazel')
+    req.url = stripPrefix(req.url, '/api')
 
-  return handler(req, res)
+    return handler(req, res)
+  })
 }
