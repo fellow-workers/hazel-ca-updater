@@ -3,12 +3,16 @@ require('dotenv').config()
 const express = require('express')
 const hazel = require('hazel-server')
 const { resolveHazelConfig } = require('./lib/hazelConfig')
+const { createAnalyticsMiddleware } = require('./lib/vercelAnalytics')
 
 const app = express()
 
 const PORT = Number(process.env.PORT) || 4000
 
 const config = resolveHazelConfig({ port: PORT })
+
+// Enable Vercel Web Analytics
+app.use(createAnalyticsMiddleware())
 
 console.log('ACCOUNT:', config.account || '(missing)')
 console.log('REPOSITORY:', config.repository || '(missing)')
