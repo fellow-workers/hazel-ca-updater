@@ -81,3 +81,41 @@ app.get('/latest.yml', async (req, res) => {
     res.status(500).send('Error generating latest.yml')
   }
 })
+
+app.get('/update/:platform/:version/latest.yml', async (req, res) => {
+  try {
+    const repo = (process.env.REPO || `${process.env.ACCOUNT}/${process.env.REPOSITORY}`) || ''
+    if (!repo) return res.status(500).type('text').send('REPO not configured')
+
+    const [owner, name] = repo.split('/')
+    const token = process.env.TOKEN || process.env.GITHUB_TOKEN
+
+    const ghResp = await fetch(`https://api.github.com/repos/${owner}/${name}/releases/latest`, {
+      headers: Object.assign({ 'User-Agent': 'hazel-latest-yml' }, token ? { Authorization: `token ${token}` } : {})
+    })
+    if (!ghResp.ok) return res.status(404).send('Latest release not found')
+
+    const rel = await ghResp.json()
+    const version = String(rel.tag_name || '').replace(/^v/, '')
+    // choose platform-appropriate asset:
+    const platform = req.params.platform
+    const pick = (assets, platform) => {
+      if (platform === 'win32') return assets.find(a => /\.exe$|\.zip$|setup/i.test(a.name))
+      if (platform === 'darwin') return assets.find(a => /\.dmg$|\.zip$|\.pkg/i.test(a.name))
+      if (platform === 'linux') return assets.find(a => /\.AppImage$|\.deb$|\.rpm/i.test(a.name))
+      return assets[0]
+    }
+    const asset = pick(rel.assets || [], platform)
+    if (!asset) return res.status(404).send('No asset for platform')
+
+    const latest = {
+      version: version,
+      path: asset.browser_download_url,
+      releaseDate: rel.published_at || rel.created_at || new Date().toISOString()
+    }
+    res.type('text/yaml').send(jsYaml.dump(latest))
+  } catch (err) {
+    console.error('latest.yml generation error', err)
+    res.status(500).send('Error generating latest.yml')
+  }
+})
