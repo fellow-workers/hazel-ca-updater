@@ -39,3 +39,45 @@ if (!config.account || !config.repository) {
 app.listen(PORT, () => {
   console.log(`Hazel server running on http://localhost:${PORT}`)
 })
+
+const fetch = require('node-fetch')
+const jsYaml = require('js-yaml')
+
+app.get('/latest.yml', async (req, res) => {
+  try {
+    const owner = process.env.REPO?.split('/')[0] || process.env.ACCOUNT
+    const repo = process.env.REPO?.split('/')[1] || process.env.REPOSITORY
+    const token = process.env.TOKEN || process.env.GITHUB_TOKEN
+
+    if (!owner || !repo) return res.status(500).type('text').send('Repo misconfigured')
+
+    const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`, {
+      headers: Object.assign({ 'User-Agent': 'hazel-latest-yml' }, token ? { Authorization: `token ${token}` } : {})
+    })
+    if (!resp.ok) return res.status(404).send('Not found')
+
+    const rel = await resp.json()
+    const version = String(rel.tag_name || '').replace(/^v/, '')
+    const published = rel.published_at || rel.created_at || new Date().toISOString()
+    // Pick platform assets or fallback to the first asset
+    const exe = rel.assets.find(a => /\.exe$/.test(a.name))
+    const dmg = rel.assets.find(a => /\.dmg$/.test(a.name))
+    const appImage = rel.assets.find(a => /\.AppImage$/.test(a.name))
+
+    // Minimal latest.yml structure - electron-updater accepts version and path
+    const latest = {
+      version: version,
+      releaseDate: published,
+      // include files for each platform if present
+      files: [
+        exe ? { url: exe.browser_download_url, name: exe.name } : undefined,
+        dmg ? { url: dmg.browser_download_url, name: dmg.name } : undefined,
+        appImage ? { url: appImage.browser_download_url, name: appImage.name } : undefined
+      ].filter(Boolean)
+    }
+
+    res.type('text/yaml').send(jsYaml.dump(latest))
+  } catch (err) {
+    res.status(500).send('Error generating latest.yml')
+  }
+})
