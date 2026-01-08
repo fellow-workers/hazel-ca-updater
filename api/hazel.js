@@ -96,10 +96,16 @@ async function serveLatestYmlIfRequested (req, res) {
       return true
     }
 
+    // create a proxy download URL so clients don't need GH auth
+    const baseUrl = process.env.URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://hazel-ca-updater.vercel.app')
+    const downloadUrl = platform
+      ? `${baseUrl}/download/${platform}?asset=${encodeURIComponent(asset.name)}&tag=${encodeURIComponent(rel.tag_name)}&update=true`
+      : asset.browser_download_url
+
     const latest = {
       version,
-      path: asset.browser_download_url,
-      files: [{ url: asset.browser_download_url, name: asset.name }],
+      path: downloadUrl,
+      files: [{ url: downloadUrl, name: asset.name }],
       releaseDate: rel.published_at || rel.created_at || new Date().toISOString()
     }
 
