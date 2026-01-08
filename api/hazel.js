@@ -39,6 +39,10 @@ function getRequestBaseUrl(req) {
   return `${proto}://${host}`
 }
 
+function encodePathSegment(value) {
+  return encodeURIComponent(String(value || ''))
+}
+
 let handler = null
 if (config.account && config.repository) {
   handler = hazel(config)
@@ -113,7 +117,7 @@ async function serveLatestYmlIfRequested (req, res) {
     // create a proxy download URL so clients don't need GH auth
     const baseUrl = getRequestBaseUrl(req)
     const downloadUrl = platform
-      ? `${baseUrl}/download/${platform}?asset=${encodeURIComponent(asset.name)}&tag=${encodeURIComponent(rel.tag_name)}&update=true`
+      ? `${baseUrl}/download/${encodePathSegment(platform)}/${encodePathSegment(asset.name)}?tag=${encodeURIComponent(rel.tag_name)}&update=true`
       : asset.browser_download_url
 
     const latest = {
@@ -181,12 +185,24 @@ async function serveLatestYmlIfRequested (req, res) {
     const path = parsed[0]
     if (!path.startsWith('/download')) return false
 
-    const platformMatch = path.match(/^\/download\/([^\/]+)/)
-    const platform = platformMatch ? platformMatch[1] : null
+    // Supports:
+    // - /download/:platform/:assetName?tag=...
+    // - /download/:platform?asset=:assetName&tag=... (legacy)
+    const m = path.match(/^\/download\/([^\/]+)(?:\/([^\/]+))?$/)
+    const platform = m ? m[1] : null
 
     try {
       const q = new URL(req.url, 'http://localhost')
-      let assetName = q.searchParams.get('asset')
+      let assetName = null
+      if (m && m[2]) {
+        try {
+          assetName = decodeURIComponent(m[2])
+        } catch (e) {
+          assetName = m[2]
+        }
+      } else {
+        assetName = q.searchParams.get('asset')
+      }
       const tag = q.searchParams.get('tag') // optional
       if (assetName && assetName.includes('/')) {
         // tolerate passing full URLs by taking the basename
