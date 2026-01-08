@@ -16,7 +16,7 @@ console.log('TOKEN:', config.token ? '✅ Loaded' : '❌ Missing')
 console.log('URL:', config.url || '(not set)')
 
 if (!config.account || !config.repository) {
-  app.get('*', (req, res) => {
+  app.use((req, res) => {
     res.status(500).type('text').send(
       [
         'Hazel configuration is missing.',

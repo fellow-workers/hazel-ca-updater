@@ -25,6 +25,20 @@ function missingConfigMessage() {
   ].join('\n')
 }
 
+function getRequestBaseUrl(req) {
+  const explicit = process.env.URL
+  if (explicit) {
+    if (/^https?:\/\//i.test(explicit)) return explicit
+    return `https://${explicit}`
+  }
+
+  const forwardedProto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
+  const proto = forwardedProto || 'https'
+  const forwardedHost = (req.headers['x-forwarded-host'] || '').split(',')[0].trim()
+  const host = forwardedHost || req.headers.host || process.env.VERCEL_URL || 'hazel-ca-updater.vercel.app'
+  return `${proto}://${host}`
+}
+
 let handler = null
 if (config.account && config.repository) {
   handler = hazel(config)
@@ -97,7 +111,7 @@ async function serveLatestYmlIfRequested (req, res) {
     }
 
     // create a proxy download URL so clients don't need GH auth
-    const baseUrl = process.env.URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://hazel-ca-updater.vercel.app')
+    const baseUrl = getRequestBaseUrl(req)
     const downloadUrl = platform
       ? `${baseUrl}/download/${platform}?asset=${encodeURIComponent(asset.name)}&tag=${encodeURIComponent(rel.tag_name)}&update=true`
       : asset.browser_download_url
@@ -167,14 +181,16 @@ async function serveLatestYmlIfRequested (req, res) {
     const path = parsed[0]
     if (!path.startsWith('/download')) return false
 
+    const platformMatch = path.match(/^\/download\/([^\/]+)/)
+    const platform = platformMatch ? platformMatch[1] : null
+
     try {
       const q = new URL(req.url, 'http://localhost')
-      const assetName = q.searchParams.get('asset')
+      let assetName = q.searchParams.get('asset')
       const tag = q.searchParams.get('tag') // optional
-      if (!assetName) {
-        res.statusCode = 400
-        res.end('Missing asset query param')
-        return true
+      if (assetName && assetName.includes('/')) {
+        // tolerate passing full URLs by taking the basename
+        assetName = assetName.split('/').pop()
       }
 
       const repo = process.env.REPO || (process.env.ACCOUNT && process.env.REPOSITORY ? `${process.env.ACCOUNT}/${process.env.REPOSITORY}` : '')
@@ -201,12 +217,38 @@ async function serveLatestYmlIfRequested (req, res) {
         return true
       }
       const rel = await relResp.json()
-      const asset = (rel.assets || []).find(a => a.name === assetName)
+
+      const pick = (assets, platform) => {
+        if (!assets || assets.length === 0) return null
+        if (platform === 'win32') return assets.find(a => /\.exe$/i.test(a.name)) || assets.find(a => /\.zip$/i.test(a.name)) || assets[0]
+        if (platform === 'darwin') return assets.find(a => /\.(dmg|pkg)$/i.test(a.name)) || assets.find(a => /\.zip$/i.test(a.name)) || assets[0]
+        if (platform === 'linux') return assets.find(a => /\.(AppImage|deb|rpm)$/i.test(a.name)) || assets[0]
+        return assets[0]
+      }
+
+      const assets = rel.assets || []
+      let asset = null
+      if (assetName) {
+        asset = assets.find(a => a.name === assetName)
+        if (!asset) {
+          const lowered = String(assetName).toLowerCase()
+          asset = assets.find(a => String(a.name || '').toLowerCase() === lowered)
+        }
+      }
+
+      if (!asset) {
+        asset = pick(assets, platform)
+      }
+
       if (!asset) {
         res.statusCode = 404
         res.end('Asset not found')
         return true
       }
+
+      console.log(
+        `[download] platform=${platform || 'unknown'} requested=${assetName || '(none)'} selected=${asset.name} tag=${rel.tag_name || '(unknown)'}`
+      )
 
       console.log('Proxying download for', asset.name, 'assetId=', asset.id, 'method=', req.method)
 
