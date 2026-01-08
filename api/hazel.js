@@ -147,39 +147,77 @@ async function serveLatestYmlIfRequested (req, res) {
       if (cacheEntry && (Date.now() - cacheEntry.ts) < SHA512_CACHE_TTL_MS) return cacheEntry.sha
 
       const assetApiUrl = `https://api.github.com/repos/${owner}/${name}/releases/assets/${asset.id}`
-      try {
-        const redirectResp = await fetch(assetApiUrl, {
-          method: 'GET',
-          headers: Object.assign({ 'User-Agent': 'hazel-sha512-check', Accept: 'application/octet-stream' }, token ? { Authorization: `token ${token}` } : {}),
-          redirect: 'manual'
-        })
-        const location = redirectResp.headers.get('location')
-        if (!location) {
-          // fallback: follow redirects and stream
-          const fullResp = await fetch(assetApiUrl, {
+
+      const MAX_ATTEMPTS = 3
+      const TIMEOUT_MS = 120000 // 2 minutes
+
+      const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          console.log(`computeAssetSha512: attempt ${attempt} for asset ${asset.id}`)
+
+          // Ask for redirect location (signed URL) first
+          const redirectResp = await fetch(assetApiUrl, {
             method: 'GET',
             headers: Object.assign({ 'User-Agent': 'hazel-sha512-check', Accept: 'application/octet-stream' }, token ? { Authorization: `token ${token}` } : {}),
-            redirect: 'follow'
+            redirect: 'manual',
+            timeout: TIMEOUT_MS
           })
-          if (!fullResp.ok) throw new Error('Failed to fetch asset for sha512 computation')
-          const h = crypto.createHash('sha512')
-          for await (const chunk of fullResp.body) h.update(chunk)
-          const sha = h.digest('base64')
-          sha512Cache.set(asset.id, { sha, ts: Date.now() })
-          return sha
-        }
 
-        // fetch the signed URL and stream to compute hash
-        const signedResp = await fetch(location, { method: 'GET', headers: { Accept: 'application/octet-stream' }, redirect: 'follow' })
-        if (!signedResp.ok) throw new Error('Failed to fetch signed asset URL for sha512 computation')
-        const h2 = crypto.createHash('sha512')
-        for await (const chunk of signedResp.body) h2.update(chunk)
-        const sha2 = h2.digest('base64')
-        sha512Cache.set(asset.id, { sha: sha2, ts: Date.now() })
-        return sha2
-      } catch (err) {
-        console.warn('Failed to compute sha512 for asset', asset.id, err && err.message)
-        return null
+          const location = redirectResp.headers.get('location')
+          if (!location) {
+            // fallback: follow redirects and stream
+            console.log('computeAssetSha512: no redirect; following redirects')
+            const fullResp = await fetch(assetApiUrl, {
+              method: 'GET',
+              headers: Object.assign({ 'User-Agent': 'hazel-sha512-check', Accept: 'application/octet-stream' }, token ? { Authorization: `token ${token}` } : {}),
+              redirect: 'follow',
+              timeout: TIMEOUT_MS
+            })
+            if (!fullResp.ok) throw new Error('Failed to fetch asset for sha512 computation (no redirect)')
+
+            const contentLength = fullResp.headers.get('content-length')
+            const h = crypto.createHash('sha512')
+            let bytes = 0
+            for await (const chunk of fullResp.body) { h.update(chunk); bytes += chunk.length }
+
+            if (contentLength && Number(contentLength) !== bytes) {
+              console.warn('computeAssetSha512: truncated download detected (no-redirect)', asset.id, 'content-length=', contentLength, 'bytes=', bytes)
+            }
+
+            const sha = h.digest('base64')
+            sha512Cache.set(asset.id, { sha, ts: Date.now() })
+            return sha
+          }
+
+          // fetch the signed URL and stream to compute hash
+          console.log('computeAssetSha512: got signed URL', location)
+          const signedResp = await fetch(location, { method: 'GET', headers: { Accept: 'application/octet-stream' }, redirect: 'follow', timeout: TIMEOUT_MS })
+          if (!signedResp.ok) throw new Error('Failed to fetch signed asset URL for sha512 computation')
+
+          const cl = signedResp.headers.get('content-length')
+          const h2 = crypto.createHash('sha512')
+          let bytes = 0
+          for await (const chunk of signedResp.body) { h2.update(chunk); bytes += chunk.length }
+
+          if (cl && Number(cl) !== bytes) {
+            console.warn('computeAssetSha512: truncated download detected (signed URL)', asset.id, 'content-length=', cl, 'bytes=', bytes)
+          }
+
+          const sha2 = h2.digest('base64')
+          sha512Cache.set(asset.id, { sha: sha2, ts: Date.now() })
+          return sha2
+        } catch (err) {
+          console.warn('Failed to compute sha512 for asset', asset.id, 'attempt', attempt, 'error:', err && err.message)
+          if (attempt < MAX_ATTEMPTS) {
+            const backoff = Math.pow(2, attempt) * 500
+            console.log('Retrying computeAssetSha512 after', backoff, 'ms')
+            await sleep(backoff)
+            continue
+          }
+          return null
+        }
       }
     }
 
