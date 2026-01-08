@@ -25,8 +25,6 @@ function missingConfigMessage() {
   ].join('\n')
 }
 
-
-
 let handler = null
 if (config.account && config.repository) {
   handler = hazel(config)
@@ -103,6 +101,45 @@ async function serveLatestYmlIfRequested (req, res) {
       path: asset.browser_download_url,
       files: [{ url: asset.browser_download_url, name: asset.name }],
       releaseDate: rel.published_at || rel.created_at || new Date().toISOString()
+    }
+    
+    // Try to include a .sha512 checksum file (if present)
+    try {
+      const checksumName = `${asset.name}.sha512`
+      // prefer exact match, fallback to any .sha512 asset
+      let checksumAsset = (rel.assets || []).find(a => a.name === checksumName)
+      if (!checksumAsset) {
+        checksumAsset = (rel.assets || []).find(a => a.name && a.name.toLowerCase().endsWith('.sha512'))
+      }
+
+      if (checksumAsset) {
+        console.log(`Attempting to fetch checksum asset id=${checksumAsset.id} name=${checksumAsset.name}`)
+        const csRes = await fetch(
+          `https://api.github.com/repos/${owner}/${name}/releases/assets/${checksumAsset.id}`,
+          {
+            headers: Object.assign(
+              { 'User-Agent': 'hazel-latest-yml' },
+              token ? { Authorization: `token ${token}` } : {}
+            )
+          }
+        )
+
+        if (!csRes.ok) {
+          console.warn('Checksum fetch failed', checksumAsset.id, csRes.status)
+        } else {
+          const sha512 = (await csRes.text()).trim()
+          if (/^[A-Za-z0-9+/=]+$/.test(sha512)) {
+            latest.files[0].sha512 = sha512
+            console.log('Included sha512 for', asset.name)
+          } else {
+            console.warn('Checksum content not base64 for', checksumAsset.name)
+          }
+        }
+      } else {
+        console.debug('No .sha512 asset found for', asset.name)
+      }
+    } catch (err) {
+      console.error('Error fetching checksum asset', err && err.message)
     }
 
     res.setHeader('Content-Type', 'text/yaml; charset=utf-8')
