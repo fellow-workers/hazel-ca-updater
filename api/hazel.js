@@ -161,15 +161,118 @@ async function serveLatestYmlIfRequested (req, res) {
     }
   }
 
-  // Try to serve latest.yml; otherwise fall back to hazel handler
-  serveLatestYmlIfRequested(req, res).then(served => {
+  // Add above serveLatestYmlIfRequested or near top of file:
+  async function serveDownloadIfRequested (req, res) {
+    const parsed = (req.url || '/').split('?')
+    const path = parsed[0]
+    if (!path.startsWith('/download')) return false
+
+    try {
+      const q = new URL(req.url, 'http://localhost')
+      const assetName = q.searchParams.get('asset')
+      const tag = q.searchParams.get('tag') // optional
+      if (!assetName) {
+        res.statusCode = 400
+        res.end('Missing asset query param')
+        return true
+      }
+
+      const repo = process.env.REPO || (process.env.ACCOUNT && process.env.REPOSITORY ? `${process.env.ACCOUNT}/${process.env.REPOSITORY}` : '')
+      if (!repo) {
+        res.statusCode = 500
+        res.end('REPO not configured')
+        return true
+      }
+
+      const [owner, name] = repo.split('/')
+      const token = process.env.TOKEN || process.env.GITHUB_TOKEN
+
+      // get the release (by tag if provided, otherwise latest)
+      const releaseUrl = tag
+        ? `https://api.github.com/repos/${owner}/${name}/releases/tags/${encodeURIComponent(tag)}`
+        : `https://api.github.com/repos/${owner}/${name}/releases/latest`
+
+      const relResp = await fetch(releaseUrl, {
+        headers: Object.assign({'User-Agent':'hazel-download-proxy'}, token ? { Authorization: `token ${token}` } : {})
+      })
+      if (!relResp.ok) {
+        res.statusCode = relResp.status
+        res.end('Release not found')
+        return true
+      }
+      const rel = await relResp.json()
+      const asset = (rel.assets || []).find(a => a.name === assetName)
+      if (!asset) {
+        res.statusCode = 404
+        res.end('Asset not found')
+        return true
+      }
+
+      console.log('Proxying download for', asset.name, 'assetId=', asset.id, 'method=', req.method)
+
+      // Forward method and important headers (Range, User-Agent, If-None-Match)
+      const forwardHeaders = {
+        'User-Agent': req.headers['user-agent'] || 'hazel-download-proxy',
+        Accept: 'application/octet-stream'
+      }
+      if (req.headers.range) forwardHeaders.Range = req.headers.range
+      if (req.headers['if-none-match']) forwardHeaders['If-None-Match'] = req.headers['if-none-match']
+
+      const assetRes = await fetch(
+        `https://api.github.com/repos/${owner}/${name}/releases/assets/${asset.id}`,
+        {
+          method: req.method || 'GET',
+          headers: Object.assign(forwardHeaders, token ? { Authorization: `token ${token}` } : {}),
+          redirect: 'follow'
+        }
+      )
+
+      if (!assetRes.ok && assetRes.status !== 206 && assetRes.status !== 200) {
+        console.warn('Asset fetch failed', asset.id, assetRes.status)
+        res.statusCode = assetRes.status
+        const body = await assetRes.text().catch(()=>'')
+        res.end(body || `Asset fetch failed ${assetRes.status}`)
+        return true
+      }
+
+      // copy relevant headers to response
+      assetRes.headers.forEach((v,k) => {
+        // some headers are safe to forward
+        if (['content-type','content-length','content-disposition','accept-ranges','etag','last-modified','content-range'].includes(k.toLowerCase())) {
+          res.setHeader(k, v)
+        }
+      })
+      res.statusCode = assetRes.status
+
+      if (req.method === 'HEAD') {
+        res.end()
+        return true
+      }
+
+      const body = assetRes.body
+      // Stream body to client
+      body.pipe(res)
+      return true
+    } catch (err) {
+      console.error('download proxy error', err && err.message)
+      res.statusCode = 500
+      res.end('Error proxying download')
+      return true
+    }
+  }
+
+  serveDownloadIfRequested(req, res).then(served => {
     if (served) return
-    return handler(req, res)
-  }).catch(err => {
-    console.error('serveLatestYmlIfRequested error', err)
-    res.statusCode = 500
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-    res.end('Internal error')
+    // Try to serve latest.yml; otherwise fall back to hazel handler
+    serveLatestYmlIfRequested(req, res).then(served => {
+      if (served) return
+      return handler(req, res)
+    }).catch(err => {
+      console.error('serveLatestYmlIfRequested error', err)
+      res.statusCode = 500
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+      res.end('Internal error')
+    })
+    // --- serve latest.yml for electron-updater compatibility ---
   })
-  // --- serve latest.yml for electron-updater compatibility ---
 }
