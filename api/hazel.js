@@ -218,22 +218,70 @@ async function serveLatestYmlIfRequested (req, res) {
       if (req.headers.range) forwardHeaders.Range = req.headers.range
       if (req.headers['if-none-match']) forwardHeaders['If-None-Match'] = req.headers['if-none-match']
 
-      const assetRes = await fetch(
-        `https://api.github.com/repos/${owner}/${name}/releases/assets/${asset.id}`,
-        {
-          method: req.method || 'GET',
-          headers: Object.assign(forwardHeaders, token ? { Authorization: `token ${token}` } : {}),
-          redirect: 'follow'
+      // Resolve the actual asset response. If client requested Range or HEAD we
+      // first call the GitHub assets API WITHOUT Range and with redirect: 'manual'
+      // to get the signed CDN URL, then call that URL with the client's Range/HEAD.
+      let assetRes;
+      const assetApiUrl = `https://api.github.com/repos/${owner}/${name}/releases/assets/${asset.id}`;
+
+      try {
+        if (req.headers.range || req.method === 'HEAD') {
+          // Get redirect location (signed URL) without forwarding Range
+          const redirectResp = await fetch(assetApiUrl, {
+            method: 'GET',
+            headers: Object.assign(
+              { 'User-Agent': 'hazel-download-proxy', Accept: 'application/octet-stream' },
+              token ? { Authorization: `token ${token}` } : {}
+            ),
+            redirect: 'manual'
+          });
+
+          const location = redirectResp.headers.get('location');
+          if (location) {
+            console.log('Got signed asset URL, proxying with Range/HEAD to', location);
+            assetRes = await fetch(location, {
+              method: req.method || 'GET',
+              headers: Object.assign(
+                { 'User-Agent': req.headers['user-agent'] || 'hazel-download-proxy' },
+                req.headers.range ? { Range: req.headers.range } : {}
+              ),
+              redirect: 'follow'
+            });
+          } else {
+            console.warn('No redirect location from assets API; following redirects fallback');
+            assetRes = await fetch(assetApiUrl, {
+              method: 'GET',
+              headers: Object.assign(
+                { 'User-Agent': 'hazel-download-proxy', Accept: 'application/octet-stream' },
+                token ? { Authorization: `token ${token}` } : {}
+              ),
+              redirect: 'follow'
+            });
+          }
+        } else {
+          assetRes = await fetch(assetApiUrl, {
+            method: req.method || 'GET',
+            headers: Object.assign(
+              { 'User-Agent': req.headers['user-agent'] || 'hazel-download-proxy', Accept: 'application/octet-stream' },
+              token ? { Authorization: `token ${token}` } : {}
+            ),
+            redirect: 'follow'
+          });
         }
-      )
+      } catch (err) {
+        console.error('Error fetching asset (network):', err && err.message);
+        res.statusCode = 502;
+        res.end('Error fetching asset');
+        return true;
+      }
 
       if (!assetRes.ok && assetRes.status !== 206 && assetRes.status !== 200) {
-        console.warn('Asset fetch failed', asset.id, assetRes.status, [...assetRes.headers.entries()])
-        res.statusCode = assetRes.status
-        const bodyText = await assetRes.text().catch(()=>'<no-body>')
-        console.warn('Asset fetch body (first 200 chars):', bodyText.slice(0,200))
-        res.end(bodyText || `Asset fetch failed ${assetRes.status}`)
-        return true
+        console.warn('Asset fetch failed', asset.id, assetRes.status, [...assetRes.headers.entries()]);
+        res.statusCode = assetRes.status;
+        const bodyText = await assetRes.text().catch(()=>'<no-body>');
+        console.warn('Asset fetch body (first 200 chars):', bodyText.slice(0,200));
+        res.end(bodyText || `Asset fetch failed ${assetRes.status}`);
+        return true;
       }
 
       // copy relevant headers to response
