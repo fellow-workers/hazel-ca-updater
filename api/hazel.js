@@ -62,6 +62,11 @@ module.exports = (req, res) => {
 // --- serve latest.yml for electron-updater compatibility ---
 const fetch = require('node-fetch') // v2 for CommonJS
 const jsYaml = require('js-yaml')
+const crypto = require('crypto')
+
+// simple in-memory cache for computed sha512s to avoid re-downloading large assets repeatedly
+const sha512Cache = new Map()
+const SHA512_CACHE_TTL_MS = 1000 * 60 * 60 // 1 hour
 
 async function serveLatestYmlIfRequested (req, res) {
   // strip query string (electron-updater appends ?noCache=...)
@@ -127,7 +132,7 @@ async function serveLatestYmlIfRequested (req, res) {
       releaseDate: rel.published_at || rel.created_at || new Date().toISOString()
     }
 
-  // Try to include a .sha512 checksum file (if present)
+  // Try to include a .sha512 checksum file (if present) and verify against the actual asset
   try {
     const checksumName = `${asset.name}.sha512`
     let checksumAsset = (rel.assets || []).find(a => a.name === checksumName)
@@ -135,6 +140,50 @@ async function serveLatestYmlIfRequested (req, res) {
       checksumAsset = (rel.assets || []).find(a => a.name && a.name.toLowerCase().endsWith('.sha512'))
     }
 
+    // helper to compute sha512 of an asset (cached)
+    async function computeAssetSha512(asset) {
+      if (!asset || !asset.id) return null
+      const cacheEntry = sha512Cache.get(asset.id)
+      if (cacheEntry && (Date.now() - cacheEntry.ts) < SHA512_CACHE_TTL_MS) return cacheEntry.sha
+
+      const assetApiUrl = `https://api.github.com/repos/${owner}/${name}/releases/assets/${asset.id}`
+      try {
+        const redirectResp = await fetch(assetApiUrl, {
+          method: 'GET',
+          headers: Object.assign({ 'User-Agent': 'hazel-sha512-check', Accept: 'application/octet-stream' }, token ? { Authorization: `token ${token}` } : {}),
+          redirect: 'manual'
+        })
+        const location = redirectResp.headers.get('location')
+        if (!location) {
+          // fallback: follow redirects and stream
+          const fullResp = await fetch(assetApiUrl, {
+            method: 'GET',
+            headers: Object.assign({ 'User-Agent': 'hazel-sha512-check', Accept: 'application/octet-stream' }, token ? { Authorization: `token ${token}` } : {}),
+            redirect: 'follow'
+          })
+          if (!fullResp.ok) throw new Error('Failed to fetch asset for sha512 computation')
+          const h = crypto.createHash('sha512')
+          for await (const chunk of fullResp.body) h.update(chunk)
+          const sha = h.digest('base64')
+          sha512Cache.set(asset.id, { sha, ts: Date.now() })
+          return sha
+        }
+
+        // fetch the signed URL and stream to compute hash
+        const signedResp = await fetch(location, { method: 'GET', headers: { Accept: 'application/octet-stream' }, redirect: 'follow' })
+        if (!signedResp.ok) throw new Error('Failed to fetch signed asset URL for sha512 computation')
+        const h2 = crypto.createHash('sha512')
+        for await (const chunk of signedResp.body) h2.update(chunk)
+        const sha2 = h2.digest('base64')
+        sha512Cache.set(asset.id, { sha: sha2, ts: Date.now() })
+        return sha2
+      } catch (err) {
+        console.warn('Failed to compute sha512 for asset', asset.id, err && err.message)
+        return null
+      }
+    }
+
+    let checksumValue = null
     if (checksumAsset) {
       console.log(`Attempting to fetch checksum asset id=${checksumAsset.id} name=${checksumAsset.name}`)
       const csRes = await fetch(
@@ -150,21 +199,43 @@ async function serveLatestYmlIfRequested (req, res) {
       if (!csRes.ok) {
         console.warn('Checksum fetch failed', checksumAsset.id, csRes.status)
       } else {
-        let sha512 = (await csRes.text())
-        // sanitize: remove whitespace/newlines, then validate base64 and correct length
-        sha512 = sha512.replace(/\s+/g, '').trim()
-        if (/^[A-Za-z0-9+/=]+$/.test(sha512) && sha512.length === 88) {
-          latest.files[0].sha512 = sha512
-          console.log('Included sha512 for', asset.name)
-        } else {
-          console.warn('Checksum not valid base64/length for', checksumAsset.name, 'len=' + sha512.length, 'sample=' + sha512.slice(0,16))
+        checksumValue = (await csRes.text()).replace(/\s+/g, '').trim()
+        if (!(/^[A-Za-z0-9+/=]+$/.test(checksumValue) && checksumValue.length === 88)) {
+          console.warn('Checksum asset content not valid base64/length for', checksumAsset.name, 'len=' + checksumValue.length)
+          checksumValue = null
         }
       }
     } else {
       console.debug('No .sha512 asset found for', asset.name)
     }
+
+    // If a checksum asset is provided, include it immediately and verify in background.
+    // If no checksum asset exists, compute synchronously (blocking) so latest.yml contains a sha512.
+    if (checksumValue) {
+      latest.files[0].sha512 = checksumValue
+      console.log('Included provided sha512 for', asset.name)
+
+      // background verification (non-blocking)
+      computeAssetSha512(asset).then(c => {
+        if (c && c !== checksumValue) {
+          console.warn('Checksum mismatch between .sha512 asset and computed value for', asset.name)
+          console.warn('  .sha512 asset:', checksumValue)
+          console.warn('  computed    :', c)
+          // update cache with computed value so future calls will include it
+          sha512Cache.set(asset.id, { sha: c, ts: Date.now() })
+        }
+      }).catch(err => {
+        console.warn('Background sha512 verification failed for', asset.id, err && err.message)
+      })
+    } else {
+      const computed = await computeAssetSha512(asset)
+      if (computed) {
+        latest.files[0].sha512 = computed
+        console.log('Included computed sha512 for', asset.name)
+      }
+    }
   } catch (err) {
-    console.error('Error fetching checksum asset', err && err.message)
+    console.error('Error fetching/checking checksum asset', err && err.message)
   }
 
       res.setHeader('Content-Type', 'text/yaml; charset=utf-8')
@@ -358,9 +429,17 @@ async function serveLatestYmlIfRequested (req, res) {
 
       const body = assetRes.body
 
+      // track bytes streamed to help diagnose truncated downloads
+      let bytes = 0
+      body.on('data', chunk => { try { bytes += chunk.length } catch (e) {} })
+
       body.on('error', err => {
         console.error('Error streaming asset body', err && err.message)
         try { res.destroy(err) } catch (e) {}
+      })
+
+      res.on('finish', () => {
+        console.log('Download proxy stream finished for', asset.name, 'bytes=', bytes)
       })
 
       res.on('close', () => {
