@@ -228,10 +228,11 @@ async function serveLatestYmlIfRequested (req, res) {
       )
 
       if (!assetRes.ok && assetRes.status !== 206 && assetRes.status !== 200) {
-        console.warn('Asset fetch failed', asset.id, assetRes.status)
+        console.warn('Asset fetch failed', asset.id, assetRes.status, [...assetRes.headers.entries()])
         res.statusCode = assetRes.status
-        const body = await assetRes.text().catch(()=>'')
-        res.end(body || `Asset fetch failed ${assetRes.status}`)
+        const bodyText = await assetRes.text().catch(()=>'<no-body>')
+        console.warn('Asset fetch body (first 200 chars):', bodyText.slice(0,200))
+        res.end(bodyText || `Asset fetch failed ${assetRes.status}`)
         return true
       }
 
@@ -250,10 +251,24 @@ async function serveLatestYmlIfRequested (req, res) {
       }
 
       const body = assetRes.body
+
+      body.on('error', err => {
+        console.error('Error streaming asset body', err && err.message)
+        try { res.destroy(err) } catch (e) {}
+      })
+
+      res.on('close', () => {
+        try { body.destroy() } catch (e) {}
+      })
+
+      res.on('error', err => {
+        console.error('Client response error', err && err.message)
+        try { body.destroy() } catch (e) {}
+      })
+
       // Stream body to client
       body.pipe(res)
-      return true
-    } catch (err) {
+      return true} catch (err) {
       console.error('download proxy error', err && err.message)
       res.statusCode = 500
       res.end('Error proxying download')
