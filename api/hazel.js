@@ -72,9 +72,10 @@ async function serveLatestYmlIfRequested (req, res) {
   // strip query string (electron-updater appends ?noCache=...)
   const path = (req.url || '/').split('?')[0]
 
-  // match /latest.yml OR /update/:platform/:version/latest.yml
-  const isLatestRoot = path === '/latest.yml'
-  const m = path.match(/^\/update\/([^\/]+)\/([^\/]+)\/latest\.yml$/)
+  // match /latest.yml OR /latest-*.yml OR /update/:platform/:version/latest(-variant).yml
+  const isLatestRoot = /^\/latest(?:-[^\/]+)?\.yml$/.test(path)
+  // accept latest.yml or latest-*.yml (e.g. latest-mac.yml, latest-linux.yml)
+  const m = path.match(/^\/update\/([^\/]+)\/([^\/]+)\/latest(?:-[^\/]+)?\.yml$/)
   if (!isLatestRoot && !m) return false
 
   const platform = m ? m[1] : null
