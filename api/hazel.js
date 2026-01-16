@@ -119,11 +119,18 @@ async function serveLatestYmlIfRequested (req, res) {
       return true
     }
 
-    // create a proxy download URL so clients don't need GH auth
+    // decide whether to proxy downloads through Vercel or point clients
+    // directly at the GitHub CDN (browser_download_url). When running on
+    // serverless platforms the proxy can cause extra cold starts and FOT
+    // traffic; set `DISABLE_DOWNLOAD_PROXY=true` in the environment to
+    // have latest.yml point directly to the release asset.
+    const disableProxy = String(process.env.DISABLE_DOWNLOAD_PROXY || process.env.NO_PROXY_DOWNLOAD || '').toLowerCase() === 'true'
     const baseUrl = getRequestBaseUrl(req)
-    const downloadUrl = platform
-      ? `${baseUrl}/download/${encodePathSegment(platform)}/${encodePathSegment(asset.name)}?tag=${encodeURIComponent(rel.tag_name)}&update=true`
-      : asset.browser_download_url
+    const downloadUrl = disableProxy
+      ? asset.browser_download_url
+      : (platform
+        ? `${baseUrl}/download/${encodePathSegment(platform)}/${encodePathSegment(asset.name)}?tag=${encodeURIComponent(rel.tag_name)}&update=true`
+        : asset.browser_download_url)
 
     const latest = {
       version,
