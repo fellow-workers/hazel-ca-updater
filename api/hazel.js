@@ -399,49 +399,30 @@ async function serveLatestYmlIfRequested (req, res) {
       const assetApiUrl = `https://api.github.com/repos/${owner}/${name}/releases/assets/${asset.id}`;
 
       try {
-        if (req.headers.range || req.method === 'HEAD') {
-          // Get redirect location (signed URL) without forwarding Range
-          const redirectResp = await fetch(assetApiUrl, {
-            method: 'GET',
-            headers: Object.assign(
-              { 'User-Agent': 'hazel-download-proxy', Accept: 'application/octet-stream' },
-              token ? { Authorization: `token ${token}` } : {}
-            ),
-            redirect: 'manual'
-          });
+        // Ask GitHub Assets API for the signed redirect URL (manual redirect)
+        const redirectResp = await fetch(assetApiUrl, {
+          method: 'GET',
+          headers: Object.assign({ 'User-Agent': 'hazel-download-proxy', Accept: 'application/octet-stream' }, token ? { Authorization: `token ${token}` } : {}),
+          redirect: 'manual'
+        })
 
-          const location = redirectResp.headers.get('location');
-          if (location) {
-            console.log('Got signed asset URL, proxying with Range/HEAD to', location);
-            assetRes = await fetch(location, {
-              method: req.method || 'GET',
-              headers: Object.assign(
-                { 'User-Agent': req.headers['user-agent'] || 'hazel-download-proxy' },
-                req.headers.range ? { Range: req.headers.range } : {}
-              ),
-              redirect: 'follow'
-            });
-          } else {
-            console.warn('No redirect location from assets API; following redirects fallback');
-            assetRes = await fetch(assetApiUrl, {
-              method: 'GET',
-              headers: Object.assign(
-                { 'User-Agent': 'hazel-download-proxy', Accept: 'application/octet-stream' },
-                token ? { Authorization: `token ${token}` } : {}
-              ),
-              redirect: 'follow'
-            });
-          }
-        } else {
-          assetRes = await fetch(assetApiUrl, {
-            method: req.method || 'GET',
-            headers: Object.assign(
-              { 'User-Agent': req.headers['user-agent'] || 'hazel-download-proxy', Accept: 'application/octet-stream' },
-              token ? { Authorization: `token ${token}` } : {}
-            ),
-            redirect: 'follow'
-          });
+        const location = redirectResp.headers.get('location')
+        if (location) {
+          // Prefer redirecting the client to the signed CDN URL instead of proxying the binary.
+          // This prevents Vercel from streaming large files and lets clients download directly.
+          console.log('Got signed asset URL, redirecting client to', location)
+          res.statusCode = 307
+          res.setHeader('Location', location)
+          res.end()
+          return true
         }
+
+        // No signed Location header — fall back to fetching the asset (follow redirects)
+        assetRes = await fetch(assetApiUrl, {
+          method: req.method || 'GET',
+          headers: Object.assign({ 'User-Agent': req.headers['user-agent'] || 'hazel-download-proxy', Accept: 'application/octet-stream' }, token ? { Authorization: `token ${token}` } : {}),
+          redirect: 'follow'
+        })
       } catch (err) {
         console.error('Error fetching asset (network):', err && err.message);
         res.statusCode = 502;
