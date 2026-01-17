@@ -43,6 +43,18 @@ function encodePathSegment(value) {
   return encodeURIComponent(String(value || ''))
 }
 
+// Helper to pick the best asset for a platform. Prefer .zip over .dmg for darwin.
+function pickAsset(assets, platform) {
+  if (!assets || assets.length === 0) return null
+  if (platform === 'win32') return assets.find(a => /\.exe$/i.test(a.name)) || assets.find(a => /\.zip$/i.test(a.name)) || assets[0]
+  if (platform === 'darwin') {
+    // Prefer zip, then dmg, then pkg, then any asset
+    return assets.find(a => /\.zip$/i.test(a.name)) || assets.find(a => /\.dmg$/i.test(a.name)) || assets.find(a => /\.pkg$/i.test(a.name)) || assets[0]
+  }
+  if (platform === 'linux') return assets.find(a => /\.(AppImage|deb|rpm)$/i.test(a.name)) || assets[0]
+  return assets[0]
+}
+
 let handler = null
 if (config.account && config.repository) {
   handler = hazel(config)
@@ -105,12 +117,7 @@ async function serveLatestYmlIfRequested (req, res) {
     const rel = await ghResp.json()
     const version = String(rel.tag_name || '').replace(/^v/, '')
 
-    const pick = (assets, platform) => {
-      if (platform === 'win32') return assets.find(a => /\.(exe|zip)$/i.test(a.name))
-      if (platform === 'darwin') return assets.find(a => /\.(dmg|zip|pkg)$/i.test(a.name))
-      if (platform === 'linux') return assets.find(a => /\.(AppImage|deb|rpm)$/i.test(a.name))
-      return assets[0]
-    }
+    const pick = (assets, platform) => pickAsset(assets, platform)
 
     const asset = pick(rel.assets || [], platform)
     if (!asset) {
@@ -351,13 +358,7 @@ async function serveLatestYmlIfRequested (req, res) {
       }
       const rel = await relResp.json()
 
-      const pick = (assets, platform) => {
-        if (!assets || assets.length === 0) return null
-        if (platform === 'win32') return assets.find(a => /\.exe$/i.test(a.name)) || assets.find(a => /\.zip$/i.test(a.name)) || assets[0]
-        if (platform === 'darwin') return assets.find(a => /\.(dmg|pkg)$/i.test(a.name)) || assets.find(a => /\.zip$/i.test(a.name)) || assets[0]
-        if (platform === 'linux') return assets.find(a => /\.(AppImage|deb|rpm)$/i.test(a.name)) || assets[0]
-        return assets[0]
-      }
+      const pick = (assets, platform) => pickAsset(assets, platform)
 
       const assets = rel.assets || []
       let asset = null
